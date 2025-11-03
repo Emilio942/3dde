@@ -1,0 +1,71 @@
+# High-quality configuration (for best results)
+
+model:
+  input_dim: 3
+  hidden_dim: 256
+  num_layers: 8
+  num_heads: 8
+  time_dim: 128
+  use_attention: true
+  dropout: 0.1
+
+diffusion:
+  num_steps: 2000  # Many steps for quality
+  beta_schedule: "cosine"
+  beta_start: 0.00005
+  beta_end: 0.02
+  lambd: 1.0
+  diag_approx: false  # Full computation
+
+training:
+  num_epochs: 500
+  batch_size: 16  # Smaller batch for large model
+  learning_rate: 0.00005
+  weight_decay: 0.00001
+  gradient_clip: 1.0
+  
+  loss:
+    eps_weight: 1.0
+    regularization_weight: 0.2
+    use_time_weighting: true
+  
+  regularization:
+    lambda_energy: 0.05
+    lambda_smoothness: 0.3
+    lambda_alignment: 0.1
+    lambda_divergence: 0.0
+  
+  optimizer: "adamw"
+  scheduler: "cosine"
+  warmup_steps: 5000
+
+data:
+  num_samples: 50000
+  node_dim: 3
+  mode: "smooth"
+  noise_level: 0.05
+  val_split: 0.1
+  num_workers: 8
+
+graph:
+  type: "grid"
+  grid_size: [20, 20]  # Larger graph
+
+sampling:
+  method: "predictor_corrector"
+  num_sample_steps: 2000
+  use_predictor_corrector: true
+  num_corrector_steps: 10
+  corrector_step_size: 0.0005
+
+logging:
+  log_interval: 200
+  save_interval: 2000
+  checkpoint_dir: "./checkpoints/high_quality"
+  log_dir: "./logs/high_quality"
+  save_samples: true
+  num_samples_to_save: 16
+
+device: "cuda"
+mixed_precision: true
+seed: 42

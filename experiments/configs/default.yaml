@@ -1,0 +1,86 @@
+# Default configuration for 3D Diffusion Model
+
+# Model Architecture
+model:
+  input_dim: 3
+  hidden_dim: 128
+  num_layers: 4
+  num_heads: 4
+  time_dim: 64
+  use_attention: true
+  dropout: 0.1
+
+# Diffusion Process
+diffusion:
+  num_steps: 1000
+  beta_schedule: "cosine"  # "linear" or "cosine"
+  beta_start: 0.0001
+  beta_end: 0.02
+  lambd: 1.0  # Laplacian scaling
+  diag_approx: false  # Use diagonal approximation for Σ
+
+# Training
+training:
+  num_epochs: 100
+  batch_size: 32
+  learning_rate: 0.0001
+  weight_decay: 0.00001
+  gradient_clip: 1.0
+  
+  # Loss weights
+  loss:
+    eps_weight: 1.0
+    regularization_weight: 0.1
+    use_time_weighting: true
+  
+  # Regularization
+  regularization:
+    lambda_energy: 0.0
+    lambda_smoothness: 0.1
+    lambda_alignment: 0.0
+    lambda_divergence: 0.0
+  
+  # Optimization
+  optimizer: "adamw"  # "adam", "adamw", "sgd"
+  scheduler: "cosine"  # "cosine", "step", "none"
+  warmup_steps: 1000
+
+# Data
+data:
+  num_samples: 10000
+  node_dim: 3
+  mode: "smooth"  # "random", "smooth", "wave", "cluster"
+  noise_level: 0.1
+  val_split: 0.2
+  num_workers: 4
+
+# Graph Structure
+graph:
+  type: "grid"  # "grid", "molecular", "custom"
+  grid_size: [10, 10]  # For grid graphs
+  # molecular_config:  # For molecular graphs
+  #   cutoff_radius: 2.0
+  #   k_neighbors: 5
+
+# Sampling
+sampling:
+  method: "ddpm"  # "ddpm", "ddim", "predictor_corrector"
+  num_sample_steps: 1000  # Can be less than num_steps for DDIM
+  eta: 0.0  # DDIM stochasticity (0=deterministic, 1=stochastic)
+  use_predictor_corrector: false
+  num_corrector_steps: 5
+  corrector_step_size: 0.001
+
+# Logging and Checkpoints
+logging:
+  log_interval: 100
+  save_interval: 1000
+  checkpoint_dir: "./checkpoints"
+  log_dir: "./logs"
+  save_samples: true
+  num_samples_to_save: 8
+
+# Hardware
+device: "cuda"  # "cuda" or "cpu"
+mixed_precision: false
+seed: 42

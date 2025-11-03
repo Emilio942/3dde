@@ -1,0 +1,59 @@
+# Fast training configuration (for quick experiments)
+
+model:
+  input_dim: 3
+  hidden_dim: 64
+  num_layers: 3
+  num_heads: 4
+  time_dim: 32
+  use_attention: true
+  dropout: 0.1
+
+diffusion:
+  num_steps: 100  # Much fewer steps
+  beta_schedule: "linear"
+  lambd: 1.0
+  diag_approx: true  # Faster computation
+
+training:
+  num_epochs: 10
+  batch_size: 64
+  learning_rate: 0.001
+  weight_decay: 0.00001
+  
+  loss:
+    eps_weight: 1.0
+    regularization_weight: 0.0  # No regularization for speed
+    use_time_weighting: false
+  
+  regularization:
+    lambda_energy: 0.0
+    lambda_smoothness: 0.0
+    lambda_alignment: 0.0
+    lambda_divergence: 0.0
+
+data:
+  num_samples: 1000  # Smaller dataset
+  node_dim: 3
+  mode: "smooth"
+  val_split: 0.2
+  num_workers: 2
+
+graph:
+  type: "grid"
+  grid_size: [5, 5]  # Small graph
+
+sampling:
+  method: "ddim"
+  num_sample_steps: 20  # Much fewer sampling steps
+  eta: 0.0
+
+logging:
+  log_interval: 50
+  save_interval: 500
+  checkpoint_dir: "./checkpoints/fast"
+  save_samples: true
+  num_samples_to_save: 4
+
+device: "cuda"
+seed: 42
