@@ -13,7 +13,7 @@ import json
 from tqdm import tqdm
 import time
 
-from ..core.precompute import precompute_phi_sigma_explicit, get_Phi_Sigma_at_t
+from ..core.precompute import precompute_phi_sigma_explicit, get_Phi_Sigma_at_t, SpectralDiffusion
 from ..core.forward import forward_noising_batch, sample_timesteps
 from ..training.losses import CombinedLoss
 from ..training.regularizers import CombinedPhysicsRegularizer
@@ -33,7 +33,13 @@ class DiffusionTrainer:
         reg_config: Optional[Dict] = None,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         checkpoint_dir: str = "./checkpoints",
-        log_interval: int = 100
+        log_interval: int = 100,
+        save_interval: int = 0,
+        use_spectral: bool = True,
+        # Diffusion parameters
+        beta_schedule_type: str = "linear",
+        lambd: Optional[float] = None,
+        diag_approx: bool = True
     ):
         """
         Args:
@@ -47,22 +53,45 @@ class DiffusionTrainer:
             device: Device to train on
             checkpoint_dir: Directory for checkpoints
             log_interval: Steps between logging
+            save_interval: Epochs between saving permanent checkpoints (0 = disable)
+            use_spectral: Whether to use memory-efficient spectral decomposition
+            beta_schedule_type: Noise schedule type
+            lambd: Diffusion strength parameter
+            diag_approx: Whether to use diagonal approximation for Sigma (non-spectral only)
         """
         self.model = model.to(device)
         self.L = L.to(device)
         self.num_steps = num_steps
         self.device = device
+        self.use_spectral = use_spectral
         self.checkpoint_dir = Path(checkpoint_dir)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         self.log_interval = log_interval
+        self.save_interval = save_interval
         
         # Precompute Φ and Σ
         print("Precomputing diffusion matrices...")
-        self.Phi, self.Sigma = precompute_phi_sigma_explicit(
-            L, num_steps=num_steps, diag_approx=True
-        )
-        self.Phi = self.Phi.to(device)
-        self.Sigma = self.Sigma.to(device)
+        if use_spectral:
+            print("Using spectral decomposition for memory efficiency.")
+            self.spectral_diff = SpectralDiffusion(
+                self.L, 
+                num_steps=num_steps, 
+                device=device,
+                beta_schedule=beta_schedule_type,
+                gamma=lambd if lambd is not None else 1.0
+            )
+            self.Phi = None
+            self.Sigma = None
+        else:
+            self.Phi, self.Sigma = precompute_phi_sigma_explicit(
+                self.L, 
+                num_steps=num_steps, 
+                diag_approx=diag_approx,
+                beta_schedule=beta_schedule_type,
+                lambd=lambd
+            )
+            self.Phi = self.Phi.to(device)
+            self.Sigma = self.Sigma.to(device)
         
         # Setup optimizer
         self.optimizer = optim.AdamW(
@@ -123,7 +152,10 @@ class DiffusionTrainer:
             t_indices = sample_timesteps(B, self.num_steps, self.device, strategy="uniform")
             
             # Get Φ(t) and Σ(t)
-            Phi_t, Sigma_t = get_Phi_Sigma_at_t(self.Phi, self.Sigma, t_indices)
+            if self.use_spectral:
+                Phi_t, Sigma_t = self.spectral_diff.get_phi_sigma(t_indices)
+            else:
+                Phi_t, Sigma_t = get_Phi_Sigma_at_t(self.Phi, self.Sigma, t_indices)
             
             # Forward noising
             S_t, eps_true = forward_noising_batch(S_0, Phi_t, Sigma_t)
@@ -205,7 +237,10 @@ class DiffusionTrainer:
             t_indices = sample_timesteps(B, self.num_steps, self.device)
             
             # Get Φ(t) and Σ(t)
-            Phi_t, Sigma_t = get_Phi_Sigma_at_t(self.Phi, self.Sigma, t_indices)
+            if self.use_spectral:
+                Phi_t, Sigma_t = self.spectral_diff.get_phi_sigma(t_indices)
+            else:
+                Phi_t, Sigma_t = get_Phi_Sigma_at_t(self.Phi, self.Sigma, t_indices)
             
             # Forward noising
             S_t, eps_true = forward_noising_batch(S_0, Phi_t, Sigma_t)
@@ -300,6 +335,12 @@ class DiffusionTrainer:
         # Save latest checkpoint
         checkpoint_path = self.checkpoint_dir / "latest.pt"
         torch.save(checkpoint, checkpoint_path)
+        
+        # Save periodic checkpoint
+        if self.save_interval > 0 and (epoch + 1) % self.save_interval == 0:
+            periodic_path = self.checkpoint_dir / f"checkpoint_epoch_{epoch+1}.pt"
+            torch.save(checkpoint, periodic_path)
+            print(f"  ✓ Saved periodic checkpoint to {periodic_path}")
         
         # Save best checkpoint
         if is_best:

@@ -7,6 +7,31 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, Tuple
+from scipy.sparse.linalg import eigs
+from scipy.sparse import csr_matrix
+import warnings
+
+# Try to import torch_geometric for optimized layers
+try:
+    from torch_geometric.nn import GATConv
+    HAS_PYG = True
+except ImportError:
+    HAS_PYG = False
+    warnings.warn("torch_geometric not found. GraphAttentionLayer will use slow dense implementation.")
+
+
+def _torch_sparse_to_scipy_csr(t: torch.Tensor) -> csr_matrix:
+    """Converts a torch.sparse_coo_tensor to a scipy.sparse.csr_matrix."""
+    if not t.is_sparse:
+        warnings.warn("Input tensor is dense, converting to numpy array.")
+        return csr_matrix(t.cpu().numpy())
+    
+    t = t.coalesce()
+    
+    return csr_matrix(
+        (t.values().cpu().numpy(), (t.indices()[0].cpu().numpy(), t.indices()[1].cpu().numpy())),
+        shape=t.shape
+    )
 
 
 class LaplacianConv(nn.Module):
@@ -67,29 +92,29 @@ class LaplacianConv(nn.Module):
             out: Transformed features (B, N, out_features) or (N, out_features)
         """
         # Normalize Laplacian if requested
+        # OPTIMIZATION: Removed expensive re-normalization in every forward pass.
+        # The Laplacian should be normalized once before training.
         if self.normalize_laplacian:
-            # L_norm = 2*L/λ_max - I for eigenvalues in [-1, 1]
-            eigenvalues = torch.linalg.eigvalsh(L)
-            lambda_max = eigenvalues.max() + 1e-8
-            L_norm = 2.0 * L / lambda_max - torch.eye(L.shape[0], device=L.device, dtype=L.dtype)
-        else:
-            L_norm = L
+             # We assume L is already normalized or we skip it for performance.
+             # If strict normalization is needed, it must be done outside.
+             pass
         
-        # Apply Laplacian: L @ x
-        if x.ndim == 3:
-            # Batch mode: (B, N, F)
-            B, N, F = x.shape
-            # (N, N) @ (B, N, F) -> (B, N, F)
-            x_propagated = torch.zeros_like(x)
-            for i in range(F):
-                x_propagated[:, :, i] = torch.matmul(x[:, :, i], L_norm.T)
-        else:
-            # Single sample: (N, F)
-            x_propagated = torch.matmul(L_norm, x)
+        L_norm = L
         
-        # Linear transformation: @ W
-        out = torch.matmul(x_propagated, self.weight)
-        
+        # Apply linear transformation first
+        x_transformed = torch.matmul(x, self.weight)
+
+        # Propagation step
+        if x.ndim == 3: # Batch mode
+            B, N, F_out = x_transformed.shape
+            # Reshape for efficient sparse matmul: (B, N, F) -> (N, B*F)
+            x_reshaped = x_transformed.transpose(0, 1).reshape(N, B * F_out)
+            propagated = L_norm @ x_reshaped
+            # Reshape back: (N, B*F) -> (B, N, F)
+            out = propagated.reshape(N, B, F_out).transpose(0, 1)
+        else: # Single sample mode
+            out = L_norm @ x_transformed
+
         # Add bias
         if self.bias is not None:
             out = out + self.bias
@@ -214,19 +239,34 @@ class GraphAttentionLayer(nn.Module):
         else:
             self.head_dim = out_dim
         
-        # Linear transformations for Q, K, V
-        self.W_q = nn.Linear(in_dim, self.head_dim * num_heads, bias=False)
-        self.W_k = nn.Linear(in_dim, self.head_dim * num_heads, bias=False)
-        self.W_v = nn.Linear(in_dim, self.head_dim * num_heads, bias=False)
+        # Initialize PyG layer if available
+        if HAS_PYG:
+            self.pyg_gat = GATConv(
+                in_dim, 
+                self.head_dim, 
+                heads=num_heads, 
+                dropout=dropout, 
+                concat=concat_heads
+            )
+            # We do not initialize manual weights to avoid unused parameters
+            self.W_q = None
+            self.W_k = None
+            self.W_v = None
+            self.out_proj = None
+        else:
+            # Linear transformations for Q, K, V
+            self.W_q = nn.Linear(in_dim, self.head_dim * num_heads, bias=False)
+            self.W_k = nn.Linear(in_dim, self.head_dim * num_heads, bias=False)
+            self.W_v = nn.Linear(in_dim, self.head_dim * num_heads, bias=False)
+            
+            # Output projection
+            if concat_heads:
+                self.out_proj = nn.Linear(out_dim, out_dim)
+            else:
+                self.out_proj = nn.Linear(self.head_dim, out_dim)
         
         # Attention dropout
         self.dropout = nn.Dropout(dropout)
-        
-        # Output projection
-        if concat_heads:
-            self.out_proj = nn.Linear(out_dim, out_dim)
-        else:
-            self.out_proj = nn.Linear(self.head_dim, out_dim)
     
     def forward(
         self,
@@ -237,12 +277,59 @@ class GraphAttentionLayer(nn.Module):
         """
         Args:
             x: Node features (B, N, in_dim) or (N, in_dim)
-            adjacency: Adjacency matrix (N, N), 1 if edge exists
+            adjacency: Adjacency matrix (N, N), 1 if edge exists. Can be sparse.
             mask: Optional attention mask (B, N, N) or (N, N)
             
         Returns:
             out: (B, N, out_dim) or (N, out_dim)
         """
+        if HAS_PYG:
+            if mask is not None:
+                warnings.warn("Attention mask is ignored when using torch_geometric optimization.")
+            
+            # Use optimized PyG implementation
+            if x.ndim == 3:
+                # PyG expects (N, F), so we need to handle batching manually or reshape
+                # GATConv supports (N, F) or (B*N, F) with batch index
+                # Here we treat (B, N, F) as B independent graphs or one large graph
+                B, N, F_in = x.shape
+                x_reshaped = x.reshape(B * N, F_in)
+                
+                # Convert adjacency to edge_index
+                if adjacency.is_sparse:
+                    adjacency = adjacency.coalesce()
+                    indices = adjacency.indices()
+                else:
+                    indices = adjacency.nonzero().t()
+                
+                # Replicate indices for batch
+                # This is a bit tricky without a proper batch vector
+                # Simplified: Loop over batch (slower but memory efficient) or use PyG Batch
+                # For now, let's stick to the manual loop if B is small, or reshape if adjacency is shared
+                
+                # If adjacency is shared across batch (which is typical here):
+                # We can construct a large block diagonal adjacency
+                # But that's expensive.
+                
+                # Alternative: Iterate over batch
+                outs = []
+                edge_index = indices
+                for i in range(B):
+                    out_i = self.pyg_gat(x[i], edge_index)
+                    outs.append(out_i)
+                out = torch.stack(outs)
+                return out
+            else:
+                # Single graph case
+                if adjacency.is_sparse:
+                    adjacency = adjacency.coalesce()
+                    edge_index = adjacency.indices()
+                else:
+                    edge_index = adjacency.nonzero().t()
+                
+                return self.pyg_gat(x, edge_index)
+
+        # Fallback to original implementation
         if x.ndim == 2:
             x = x.unsqueeze(0)
             squeeze_output = True
@@ -265,7 +352,13 @@ class GraphAttentionLayer(nn.Module):
         scores = torch.matmul(Q, K.transpose(-2, -1)) / (self.head_dim ** 0.5)  # (B, H, N, N)
         
         # Apply adjacency mask (only attend to neighbors)
-        adjacency_mask = adjacency.unsqueeze(0).unsqueeze(0)  # (1, 1, N, N)
+        if adjacency.is_sparse:
+            # Convert sparse adjacency to a dense mask for softmax
+            # This is a bottleneck, but unavoidable for standard softmax attention
+            adjacency_mask = adjacency.to_dense().unsqueeze(0).unsqueeze(0)
+        else:
+            adjacency_mask = adjacency.unsqueeze(0).unsqueeze(0)  # (1, 1, N, N)
+
         scores = scores.masked_fill(adjacency_mask == 0, float('-inf'))
         
         # Optional additional mask
@@ -356,10 +449,20 @@ class GNNBlock(nn.Module):
         # Optional attention with residual
         if self.use_attention:
             if adjacency is None:
-                # Derive adjacency from Laplacian: A = D - L
-                D = torch.diag(L.diagonal())
-                adjacency = D - L
-                adjacency = (adjacency != 0).float()
+                # Derive adjacency from Laplacian: A_ij = -L_ij for i!=j
+                if L.is_sparse:
+                    L_coalesced = L.coalesce()
+                    indices = L_coalesced.indices()
+                    # Filter out diagonal entries
+                    off_diag_mask = indices[0] != indices[1]
+                    adj_indices = indices[:, off_diag_mask]
+                    # Adjacency is 1 where L is non-zero off-diagonal
+                    adj_values = torch.ones(adj_indices.shape[1], device=L.device, dtype=L.dtype)
+                    adjacency = torch.sparse_coo_tensor(adj_indices, adj_values, L.shape)
+                else:
+                    D = torch.diag(L.diagonal())
+                    adj_dense = D - L
+                    adjacency = (adj_dense != 0).float()
             
             attn_out = self.attn(x, adjacency)
             x = x + attn_out

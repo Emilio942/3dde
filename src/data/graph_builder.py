@@ -123,6 +123,85 @@ def build_grid_laplacian(
     return L
 
 
+def get_grid_edges(
+    grid_size: Tuple[int, ...],
+    periodic: bool = False,
+    device: Optional[torch.device] = None
+) -> torch.Tensor:
+    """Get edge index for a regular grid graph.
+    
+    Args:
+        grid_size: Grid dimensions
+        periodic: Periodic boundary conditions
+        device: Target device
+        
+    Returns:
+        edge_index: (2, E) LongTensor
+    """
+    ndim = len(grid_size)
+    
+    # Initialize edge list
+    edges = []
+    
+    if ndim == 1:
+        # 1D grid
+        n = grid_size[0]
+        for i in range(n):
+            if i > 0: edges.append((i, i - 1))
+            elif periodic: edges.append((i, n - 1))
+            if i < n - 1: edges.append((i, i + 1))
+            elif periodic: edges.append((i, 0))
+    
+    elif ndim == 2:
+        # 2D grid
+        ny, nx = grid_size
+        for i in range(ny):
+            for j in range(nx):
+                node_idx = i * nx + j
+                # Up
+                if i > 0: edges.append((node_idx, (i - 1) * nx + j))
+                elif periodic: edges.append((node_idx, (ny - 1) * nx + j))
+                # Down
+                if i < ny - 1: edges.append((node_idx, (i + 1) * nx + j))
+                elif periodic: edges.append((node_idx, 0 * nx + j))
+                # Left
+                if j > 0: edges.append((node_idx, i * nx + (j - 1)))
+                elif periodic: edges.append((node_idx, i * nx + (nx - 1)))
+                # Right
+                if j < nx - 1: edges.append((node_idx, i * nx + (j + 1)))
+                elif periodic: edges.append((node_idx, i * nx + 0))
+
+    elif ndim == 3:
+        # 3D grid
+        nz, ny, nx = grid_size
+        for i in range(nz):
+            for j in range(ny):
+                for k in range(nx):
+                    node_idx = i * ny * nx + j * nx + k
+                    neighbors = [
+                        ((i - 1) % nz if periodic else i - 1, j, k) if i > 0 or periodic else None,
+                        ((i + 1) % nz if periodic else i + 1, j, k) if i < nz - 1 or periodic else None,
+                        (i, (j - 1) % ny if periodic else j - 1, k) if j > 0 or periodic else None,
+                        (i, (j + 1) % ny if periodic else j + 1, k) if j < ny - 1 or periodic else None,
+                        (i, j, (k - 1) % nx if periodic else k - 1) if k > 0 or periodic else None,
+                        (i, j, (k + 1) % nx if periodic else k + 1) if k < nx - 1 or periodic else None,
+                    ]
+                    for neighbor in neighbors:
+                        if neighbor is not None:
+                            ni, nj, nk = neighbor
+                            neighbor_idx = ni * ny * nx + nj * nx + nk
+                            edges.append((node_idx, neighbor_idx))
+    
+    else:
+        raise ValueError(f"Unsupported grid dimension: {ndim}")
+
+    if not edges:
+        return torch.zeros((2, 0), dtype=torch.long, device=device)
+        
+    edge_index = torch.tensor(edges, dtype=torch.long, device=device).t().contiguous()
+    return edge_index
+
+
 def build_laplacian_from_edges(
     edges: List[Tuple[int, int]],
     num_nodes: int,
@@ -130,7 +209,7 @@ def build_laplacian_from_edges(
     device: Optional[torch.device] = None,
     dtype: Optional[torch.dtype] = None
 ) -> torch.Tensor:
-    """Build Laplacian matrix from edge list.
+    """Build Laplacian matrix from edge list as a sparse tensor.
     
     Laplacian: L = D - A
     where D is degree matrix (diagonal) and A is adjacency matrix.
@@ -143,27 +222,53 @@ def build_laplacian_from_edges(
         dtype: Target dtype
         
     Returns:
-        L: Laplacian matrix (num_nodes, num_nodes)
+        L: Sparse Laplacian matrix (num_nodes, num_nodes)
     """
     if dtype is None:
         dtype = torch.float32
-    
-    # Initialize adjacency matrix
-    A = torch.zeros(num_nodes, num_nodes, device=device, dtype=dtype)
-    
-    # Fill adjacency
+
+    if not edges:
+        return torch.sparse_coo_tensor(
+            torch.empty((2, 0), dtype=torch.long),
+            torch.empty((0,), dtype=dtype),
+            (num_nodes, num_nodes)
+        ).to(device=device)
+
     if weights is None:
-        weights = [1.0] * len(edges)
+        edge_weights = torch.ones(len(edges), dtype=dtype, device=device)
+    else:
+        edge_weights = torch.tensor(weights, dtype=dtype, device=device)
+
+    # Unpack edges and create symmetric edges for the adjacency matrix
+    edge_indices = torch.tensor(edges, dtype=torch.long, device=device).t()
+    symmetric_edge_indices = torch.cat([edge_indices, edge_indices.flip(0)], dim=1)
+    symmetric_weights = torch.cat([edge_weights, edge_weights])
+
+    # Create sparse adjacency matrix A
+    A = torch.sparse_coo_tensor(
+        symmetric_edge_indices,
+        -symmetric_weights,  # Use negative weights for the -A part of L
+        (num_nodes, num_nodes),
+    ).coalesce()
+
+    # Calculate degrees (sum of absolute weights for each node)
+    degrees = torch.zeros(num_nodes, device=device, dtype=dtype)
+    degrees.scatter_add_(0, symmetric_edge_indices[0], symmetric_weights.abs())
+
+    # Create the diagonal indices for the degree matrix D
+    diag_indices = torch.arange(num_nodes, device=device).unsqueeze(0).repeat(2, 1)
+
+    # Combine indices and values for L = D - A
+    final_indices = torch.cat([diag_indices, A.indices()], dim=1)
+    final_values = torch.cat([degrees, A.values()])
     
-    for (i, j), w in zip(edges, weights):
-        A[i, j] = w
-        A[j, i] = w  # Symmetric for undirected graph
-    
-    # Compute degree matrix
-    D = torch.diag(A.sum(dim=1))
-    
-    # Laplacian
-    L = D - A
+    # Create the sparse Laplacian tensor
+    L = torch.sparse_coo_tensor(
+        final_indices,
+        final_values,
+        (num_nodes, num_nodes),
+        device=device
+    ).coalesce()
     
     return L
 
@@ -291,13 +396,18 @@ def visualize_graph_structure(L: torch.Tensor) -> None:
     """Print graph statistics and structure info.
     
     Args:
-        L: Laplacian matrix
+        L: Laplacian matrix (can be sparse or dense)
     """
-    N = L.shape[0]
+    if L.is_sparse:
+        L_dense = L.to_dense()
+    else:
+        L_dense = L
+
+    N = L_dense.shape[0]
     
     # Recover adjacency: A = D - L
-    degrees = L.diagonal()
-    A = torch.diag(degrees) - L
+    degrees = L_dense.diagonal()
+    A = torch.diag(degrees) - L_dense
     
     # Statistics
     num_edges = (A > 0).sum().item() // 2  # Undirected, so divide by 2
@@ -306,7 +416,7 @@ def visualize_graph_structure(L: torch.Tensor) -> None:
     min_degree = degrees.min().item()
     
     # Spectral properties
-    eigenvalues = torch.linalg.eigvalsh(L)
+    eigenvalues = torch.linalg.eigvalsh(L_dense)
     spectral_gap = eigenvalues[1].item() if N > 1 else 0.0
     
     print(f"Graph Structure:")

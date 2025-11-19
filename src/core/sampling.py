@@ -59,6 +59,9 @@ def compute_F_Q_from_PhiSigma(
 
 def _ensure_psd(matrix: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
     """Project matrix onto the positive semi-definite cone via eigen clipping."""
+    
+    if matrix.is_sparse:
+        matrix = matrix.to_dense()
 
     sym = 0.5 * (matrix + matrix.transpose(-1, -2))
     eigenvalues, eigenvectors = torch.linalg.eigh(sym)

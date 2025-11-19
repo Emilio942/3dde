@@ -20,9 +20,19 @@ def create_graph_from_config(config):
         return build_grid_laplacian(grid_size)
     
     elif graph_type == "molecular":
-        # For molecular graphs, would need positions
-        # This is a placeholder
-        raise NotImplementedError("Molecular graph creation from config not yet implemented")
+        # For molecular graphs, we need positions
+        if hasattr(config.graph, 'num_atoms') and config.graph.num_atoms > 0:
+            # Generate random positions for testing/synthetic data
+            # In a real scenario, this would load from a file
+            positions = torch.randn(config.graph.num_atoms, 3)
+            cutoff = getattr(config.graph, 'cutoff', 2.0)
+            L, _ = build_molecular_graph(positions, cutoff=cutoff)
+            return L
+        elif hasattr(config.graph, 'file_path') and config.graph.file_path:
+            # TODO: Implement file loading (PDB/XYZ)
+            raise NotImplementedError("Loading molecular graph from file not yet implemented")
+        else:
+            raise ValueError("Molecular graph requires 'num_atoms' in config for synthetic generation")
     
     else:
         raise ValueError(f"Unknown graph type: {graph_type}")
@@ -58,8 +68,7 @@ def create_trainer_from_config(config, model, L):
     # Loss config
     loss_config = {
         'eps_weight': config.training.loss.eps_weight,
-        'regularization_weight': config.training.loss.regularization_weight,
-        'use_time_weighting': config.training.loss.use_time_weighting
+        'regularization_weight': config.training.loss.regularization_weight
     }
     
     # Regularization config
@@ -74,20 +83,25 @@ def create_trainer_from_config(config, model, L):
     if not any(reg_config.values()):
         reg_config = None
     
+    # Check for spectral optimization flag in config, default to True if not present
+    use_spectral = getattr(config.diffusion, 'use_spectral', True)
+
     return DiffusionTrainer(
         model=model,
         L=L,
         num_steps=config.diffusion.num_steps,
         learning_rate=config.training.learning_rate,
         weight_decay=config.training.weight_decay,
-        beta_schedule_type=config.diffusion.beta_schedule,
-        lambd=config.diffusion.lambd,
-        diag_approx=config.diffusion.diag_approx,
         loss_config=loss_config,
         reg_config=reg_config,
         device=config.device,
         checkpoint_dir=config.logging.checkpoint_dir,
-        log_interval=config.logging.log_interval
+        log_interval=config.logging.log_interval,
+        save_interval=getattr(config.logging, 'save_interval', 0),
+        use_spectral=use_spectral,
+        beta_schedule_type=config.diffusion.beta_schedule,
+        lambd=config.diffusion.lambd,
+        diag_approx=config.diffusion.diag_approx
     )
 
 

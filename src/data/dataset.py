@@ -109,20 +109,17 @@ class HDF5Dataset(Dataset):
         if self.preload:
             sample = self.data[idx]
         else:
-            # Open file on first access (thread-safe)
-            if self.file is None:
-                self.file = h5py.File(self.hdf5_path, 'r')
-            
-            sample = torch.tensor(self.file[self.dataset_name][idx], dtype=torch.float32)
+            # Open file explicitly for each access to avoid resource leaks
+            # and issues with multi-process data loading
+            with h5py.File(self.hdf5_path, 'r') as f:
+                sample = torch.tensor(f[self.dataset_name][idx], dtype=torch.float32)
             
             if self.normalize:
                 sample = (sample - self.mean) / self.std
         
         return {'states': sample}
     
-    def __del__(self):
-        if self.file is not None:
-            self.file.close()
+    # __del__ removed to avoid unreliable cleanup
 
 
 class SyntheticDataset(Dataset):

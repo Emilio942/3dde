@@ -1,0 +1,72 @@
+# Overnight Training Configuration
+# Designed for long-term convergence testing
+
+# Model Architecture (Same as default)
+model:
+  input_dim: 3
+  hidden_dim: 128
+  num_layers: 4
+  num_heads: 4
+  time_dim: 64
+  use_attention: true
+  dropout: 0.1
+
+# Diffusion Process
+diffusion:
+  num_steps: 1000
+  beta_schedule: "cosine"
+  beta_start: 0.0001
+  beta_end: 0.02
+  lambd: 1.0
+  diag_approx: false
+
+# Training - EXTENDED FOR OVERNIGHT
+training:
+  num_epochs: 5000  # Increased from 100 to 5000
+  batch_size: 32
+  learning_rate: 0.0001
+  weight_decay: 0.00001
+  gradient_clip: 1.0
+  
+  loss:
+    eps_weight: 1.0
+    regularization_weight: 0.1
+    use_time_weighting: true
+  
+  regularization:
+    lambda_energy: 0.0
+    lambda_smoothness: 0.1
+    lambda_alignment: 0.0
+    lambda_divergence: 0.0
+  
+  optimizer: "adamw"
+  scheduler: "cosine"
+  warmup_steps: 1000
+
+# Data
+data:
+  num_samples: 20000 # Increased dataset size for better generalization
+  node_dim: 3
+  mode: "smooth"
+  noise_level: 0.1
+  val_split: 0.1 # Smaller validation split to use more data for training
+  num_workers: 4
+
+# Graph Structure
+graph:
+  type: "grid"
+  grid_size: [10, 10]
+
+# Logging
+logging:
+  log_interval: 100
+  save_interval: 50 # Save checkpoint every 50 epochs (plus 'best' and 'latest' always)
+  checkpoint_dir: "./checkpoints_overnight"
+  log_dir: "./logs_overnight"
+  save_samples: true
+  num_samples_to_save: 8
+
+# Hardware
+device: "cuda"
+mixed_precision: false
+seed: 42

@@ -132,7 +132,14 @@ class TestEndToEndPipeline:
         trainer.train(train_loader, val_loader, num_epochs=2)
         
         # 5. Sample
-        F, Q = compute_F_Q_from_PhiSigma(trainer.Phi, trainer.Sigma)
+        if trainer.use_spectral:
+            # Reconstruct dense matrices for testing sampling
+            t_all = torch.arange(trainer.num_steps + 1, device=trainer.device)
+            Phi, Sigma = trainer.spectral_diff.get_phi_sigma(t_all)
+        else:
+            Phi, Sigma = trainer.Phi, trainer.Sigma
+            
+        F, Q = compute_F_Q_from_PhiSigma(Phi, Sigma)
         S_T = torch.randn(4, 9, 3)
         
         model.eval()

@@ -300,8 +300,12 @@ class TestDiffusionTrainer:
         
         assert trainer.model is model
         assert trainer.optimizer is not None
-        assert trainer.Phi is not None
-        assert trainer.Sigma is not None
+        
+        if trainer.use_spectral:
+            assert trainer.spectral_diff is not None
+        else:
+            assert trainer.Phi is not None
+            assert trainer.Sigma is not None
     
     @pytest.mark.skip(reason="Trainer has no _train_step method")
     def test_single_training_step(self, simple_setup, sample_batch):

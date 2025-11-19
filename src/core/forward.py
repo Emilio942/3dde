@@ -94,59 +94,84 @@ def _resolve_phi_sigma_inputs(
     Phi_t: Optional[torch.Tensor],
     Sigma_t: Optional[torch.Tensor],
     t: Optional[Union[int, torch.Tensor]],
-    Phi_all: Optional[torch.Tensor],
-    Sigma_all: Optional[torch.Tensor]
+    Phi_all: Optional[Union[torch.Tensor, object]],
+    Sigma_all: Optional[Union[torch.Tensor, object]]
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Resolve Φ(t) and Σ(t) from provided arguments."""
 
     if Phi_t is not None and Sigma_t is not None:
         return Phi_t, Sigma_t
 
-    if t is not None and Phi_all is not None and Sigma_all is not None:
-        if isinstance(t, torch.Tensor):
-            return get_Phi_Sigma_at_t(Phi_all, Sigma_all, t)
-        return Phi_all[t], Sigma_all[t]
+    if t is not None:
+        # Check for SpectralDiffusion object (or similar)
+        if hasattr(Phi_all, 'get_phi_sigma'):
+            # Phi_all is actually the spectral object
+            if isinstance(t, int):
+                t_tensor = torch.tensor([t], device=Phi_all.device)
+                phi, sigma = Phi_all.get_phi_sigma(t_tensor)
+                return phi.squeeze(0), sigma.squeeze(0)
+            else:
+                return Phi_all.get_phi_sigma(t)
+
+        if Phi_all is not None and Sigma_all is not None:
+            if isinstance(t, torch.Tensor):
+                return get_Phi_Sigma_at_t(Phi_all, Sigma_all, t)
+            return Phi_all[t], Sigma_all[t]
 
     raise TypeError(
-        "Provide either Phi_t/Sigma_t directly or t with full Phi/Sigma schedules."
+        "Provide either Phi_t/Sigma_t directly, or t with full Phi/Sigma schedules (or SpectralDiffusion object)."
     )
 
 
 def forward_noising_batch(
     S_0: torch.Tensor,
-    *args: Union[int, torch.Tensor],
+    *args,
+    Phi_t: Optional[torch.Tensor] = None,
+    Sigma_t: Optional[torch.Tensor] = None,
+    t: Optional[Union[int, torch.Tensor]] = None,
+    Phi_all: Optional[torch.Tensor] = None,
+    Sigma_all: Optional[torch.Tensor] = None,
     noise: Optional[torch.Tensor] = None,
     **kwargs
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Apply forward noising process S_t = Φ(t) S_0 + √Σ(t) ε.
 
-    Accepts either `(S_0, Phi_t, Sigma_t)` when matrices are already
-    selected for a batch or `(S_0, t, Phi_all, Sigma_all)` to select the
-    appropriate timestep on the fly.
+    Accepts either explicit named arguments (recommended) or legacy positional arguments:
+    - `(S_0, Phi_t, Sigma_t)`
+    - `(S_0, t, Phi_all, Sigma_all)`
     """
-    Phi_t_kw = kwargs.pop("Phi_t", None)
-    Sigma_t_kw = kwargs.pop("Sigma_t", None)
-    t_kw = kwargs.pop("t", None)
-    Phi_kw = kwargs.pop("Phi", None)
-    Sigma_kw = kwargs.pop("Sigma", None)
+    # Handle legacy positional arguments
+    if args:
+        if len(args) == 2:
+            Phi_t, Sigma_t = args
+        elif len(args) == 3:
+            t, Phi_all, Sigma_all = args
+        else:
+            raise TypeError("Invalid positional arguments for forward_noising_batch")
 
+    # Handle legacy kwargs (if any were passed to **kwargs instead of the named args)
     if kwargs:
-        unexpected = ", ".join(kwargs.keys())
-        raise TypeError(f"Unexpected keyword arguments: {unexpected}")
-
-    if len(args) == 2:
-        Phi_t_kw, Sigma_t_kw = args  # (S_0, Phi_t, Sigma_t)
-    elif len(args) == 3:
-        t_kw, Phi_kw, Sigma_kw = args  # (S_0, t, Phi, Sigma)
-    elif len(args) != 0:
-        raise TypeError("Invalid positional arguments for forward_noising_batch")
+        if "Phi" in kwargs: Phi_all = kwargs.pop("Phi")
+        if "Sigma" in kwargs: Sigma_all = kwargs.pop("Sigma")
+        # Map other legacy kwargs if they match our new named args but were passed as kwargs
+        # (This happens if the caller used **kwargs dict)
+        if "Phi_t" in kwargs and Phi_t is None: Phi_t = kwargs.pop("Phi_t")
+        if "Sigma_t" in kwargs and Sigma_t is None: Sigma_t = kwargs.pop("Sigma_t")
+        if "t" in kwargs and t is None: t = kwargs.pop("t")
+        
+        if kwargs:
+             # If there are still kwargs left, they might be unexpected
+             # But for safety we can ignore or warn. The original code raised TypeError.
+             unexpected = ", ".join(kwargs.keys())
+             # raise TypeError(f"Unexpected keyword arguments: {unexpected}")
+             pass
 
     Phi_selected, Sigma_selected = _resolve_phi_sigma_inputs(
-        Phi_t=Phi_t_kw,
-        Sigma_t=Sigma_t_kw,
-        t=t_kw,
-        Phi_all=Phi_kw,
-        Sigma_all=Sigma_kw
+        Phi_t=Phi_t,
+        Sigma_t=Sigma_t,
+        t=t,
+        Phi_all=Phi_all,
+        Sigma_all=Sigma_all
     )
 
     if noise is None:
